@@ -1,0 +1,17 @@
+{
+  "os": "Windows-10-10.0.26100-SP0",
+  "python": "CPython 3.10.10",
+  "startedAt": "2025-10-21T07:06:59.363258Z",
+  "program": "D:\\EEG\\egg_encoder\\main.py",
+  "codePath": "main.py",
+  "codePathLocal": "main.py",
+  "git": {
+    "remote": "https://github.com/qazwsx2323ppp/EEG_encoder.git",
+    "commit": "7b7554c4517a42ddbf07359e9549e119f4b6dfa8"
+  },
+  "email": "2220761584@qq.com",
+  "root": "D:\\EEG\\egg_encoder",
+  "host": "DESKTOP-G642N6B",
+  "executable": "D:\\EEG\\egg_encoder\\.venv\\Scripts\\python.exe",
+  "writerId": "rvtvoi4icnnx4rx9ic3yrb8xul069c8y"
+}

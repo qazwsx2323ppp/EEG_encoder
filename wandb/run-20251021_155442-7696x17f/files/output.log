@@ -1,0 +1,10 @@
+正在加载 train 数据...
+Error executing job with overrides: []
+Traceback (most recent call last):
+  File "D:\EEG\egg_encoder\main.py", line 133, in main
+    train_dataset = TripletDataset(cfg.data, mode='train')
+  File "D:\EEG\egg_encoder\dataset.py", line 42, in __init__
+    self.indices = splits_data['splits'][mode]  # e.g., 'train', 'val', 'test'
+TypeError: list indices must be integers or slices, not str
+
+Set the environment variable HYDRA_FULL_ERROR=1 for a complete stack trace.

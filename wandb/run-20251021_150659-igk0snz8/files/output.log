@@ -1,0 +1,7 @@
+Error executing job with overrides: []
+Traceback (most recent call last):
+  File "D:\EEG\egg_encoder\main.py", line 116, in main
+    model = EEGEncoder(
+TypeError: EEGEncoder.__init__() got an unexpected keyword argument 'n_channels'
+
+Set the environment variable HYDRA_FULL_ERROR=1 for a complete stack trace.

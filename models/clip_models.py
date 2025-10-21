@@ -1,557 +1,268 @@
-import copy
-import random
-import re
-import json
-import numpy as np
-import pandas as pd
-import lightning.pytorch as pl
+# models/clip_models.py
+
 import torch
-from braindecode.models import Deep4Net
-from braindecode.models.util import to_dense_prediction_model
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import balanced_accuracy_score
 from torch import nn
-
-# from sentence_transformers import SentenceTransformer
-from transformers import AutoConfig, AutoModel, AutoTokenizer
-
-import configs.preprocess_config as preprocess_config
-from EEGClip.loss_methods import ClipLoss, SigLipLoss
-
-medication_list = ["keppra", "dilantin", "depakote"]
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-classifiers_dict = {
-    #'knn': KNeighborsClassifier(n_neighbors=10),
-    "logreg": LogisticRegression(random_state=0, max_iter=1000)
-}
+from braindecode.models import to_dense_prediction_model
 
 
-class TextEncoder(nn.Module):
+# ----------------------------------------------------
+# 1. BraindecodeShallow 类的完整定义
+# ----------------------------------------------------
+class BraindecodeShallow(nn.Module):
     def __init__(
-        self,
-        text_encoder_name,
-        text_encoder_pretrained,
-        text_encoder_trainable,
-        string_sampling=False,
-        lookup_strings=True,  # use previously computed embeddings
-        max_token_len=512,
+            self,
+            n_channels,
+            n_samples,
+            n_filters_time=40,
+            filter_time_length=25,
+            n_filters_spat=40,
+            pool_time_length=75,
+            pool_time_stride=15,
+            n_linear_layers=1,
+            embedding_dim=128,
+            drop_prob=0.5,
     ):
         super().__init__()
-        self.string_sampling = string_sampling
-        self.lookup_strings = lookup_strings
-        self.text_encoder_name = text_encoder_name
-        self.max_token_len = max_token_len
-        with open(preprocess_config.zc_sentences_emb_dict_path, "r") as f:
-            self.zc_sentences_emb_dict = json.load(f)
+        self.n_channels = n_channels
+        self.n_samples = n_samples
+        self.n_filters_time = n_filters_time
+        self.filter_time_length = filter_time_length
+        self.n_filters_spat = n_filters_spat
+        self.pool_time_length = pool_time_length
+        self.pool_time_stride = pool_time_stride
+        self.n_linear_layers = n_linear_layers
+        self.embedding_dim = embedding_dim
+        self.drop_prob = drop_prob
 
-        if self.lookup_strings:
-            embs_df = pd.read_csv(preprocess_config.embs_df_path)
-            embs_name = text_encoder_name
-            for r in range(len(embs_df)):
-                re = copy.copy(embs_df[embs_name][r])
-                # convert the string to array
-                re = re.replace("[", "")
-                re = re.replace("]", "")
-                re = re.replace(",", "")
-                re = re.split()
-                re = [float(i) for i in re]
-                embs_df[embs_name][r] = re
+        self.temporal_conv = nn.Conv2d(
+            1, n_filters_time, (filter_time_length, 1), padding="same"
+        )
+        self.spat_conv = nn.Conv2d(
+            n_filters_time, n_filters_spat, (1, n_channels), bias=False
+        )
+        self.batch_norm = nn.BatchNorm2d(n_filters_spat)
+        self.avg_pool = nn.AvgPool2d(
+            kernel_size=(pool_time_length, 1), stride=(pool_time_stride, 1)
+        )
+        self.dropout = nn.Dropout(drop_prob)
 
-            self.embs_df = embs_df
-        else:
-            if text_encoder_pretrained:
-                self.model = AutoModel.from_pretrained(
-                    text_encoder_name, output_hidden_states=True
-                )
-            else:
-                self.model = AutoModel(config=AutoConfig())
+        self.out = nn.Sequential()
+        # 动态计算卷积和池化后的特征维度
+        self.out_dim = self.calculate_out_dim()
 
-            # self.model = SentenceTransformer("hkunlp/instructor-xl")
-            print("trainable text encoder : ", text_encoder_trainable)
-            for param in self.model.parameters():
-                param.requires_grad = text_encoder_trainable
+        if n_linear_layers > 1:
+            self.out.add_module("lin_intermediate", nn.Linear(self.out_dim, self.out_dim))
+            self.out.add_module("lin_activation", nn.ELU())
+            self.out.add_module("lin_dropout", nn.Dropout(self.drop_prob))
 
-            self.tokenizer = AutoTokenizer.from_pretrained(text_encoder_name)
+        self.out.add_module("lin_embedding", nn.Linear(self.out_dim, embedding_dim))
 
-    def forward(self, string_batch):
-        string_batch = list(string_batch)
+    def calculate_out_dim(self):
+        # 模拟一次前向传播以获取输出维度
+        dummy_input = torch.randn(1, 1, self.n_samples, self.n_channels)
+        x = self.temporal_conv(dummy_input)
+        x = self.spat_conv(x)
+        x = self.batch_norm(x)
+        x = torch.square(x)
+        x = self.avg_pool(x)
+        x = torch.log(torch.clamp(x, min=1e-6))
+        x = self.dropout(x)
+        return int(x.reshape(x.shape[0], -1).shape[1])
 
-        if self.string_sampling:  # randomly sample strings from the report
-            for i, string in enumerate(string_batch):
-                # look for the positions of \n occurences
-                newlines = [m.start() for m in re.finditer(",", string)]
-                newlines.extend([0, len(string)])
-                # sample a random position
-                start, end = 0, 0
-                while end <= start:
-                    start = random.choice(newlines)
-                    end = random.choice(newlines)
-                # sample a random substring
-                string_batch[i] = string[start:end]
+    def forward(self, x):
+        # 确保输入形状为 (batch, 1, samples, channels)
+        if len(x.shape) == 3:
+            x = x.unsqueeze(1)
+        x = x.permute(0, 1, 3, 2)  # (batch, 1, channels, samples) -> (batch, 1, samples, channels)
 
-        if self.lookup_strings:  # lookup precomputed embeddings (faster training)
-            embs = []
-            for s in string_batch:
-                lookup = self.embs_df.loc[
-                    self.embs_df["report"] == s, self.text_encoder_name
-                ]
-
-                emb = lookup.tolist()[0]
-                embs.append(emb)
-            embs = torch.Tensor(embs).to(device)
-
-        else:
-            # print(string_batch)
-            # string_batch = [s.partition("pijule")[2] for s in string_batch]
-            # print(string_batch)
-            input_ids = self.tokenizer(
-                string_batch,
-                padding=True,
-                truncation=True,
-                return_tensors="pt",
-                max_length=self.max_token_len,
-            ).input_ids.to(device)
-            outputs = self.model(input_ids)
-
-            embs = outputs.last_hidden_state[:, 0, :]
-
-        return embs
+        x = self.temporal_conv(x)
+        x = self.spat_conv(x)
+        x = self.batch_norm(x)
+        x = torch.square(x)
+        x = self.avg_pool(x)
+        x = torch.log(torch.clamp(x, min=1e-6))
+        x = self.dropout(x)
+        x = x.reshape(x.shape[0], -1)  # 展平
+        x = self.out(x)
+        return x
 
 
+# ----------------------------------------------------
+# 2. BraindecodeDeep 类的完整定义
+# ----------------------------------------------------
+class BraindecodeDeep(nn.Module):
+    def __init__(
+            self,
+            n_channels,
+            n_samples,
+            n_filters_time=25,
+            filter_time_length=10,
+            n_filters_spat=25,
+            pool_time_length=3,
+            pool_time_stride=3,
+            n_linear_layers=1,
+            embedding_dim=128,
+            drop_prob=0.5,
+    ):
+        super().__init__()
+        self.n_channels = n_channels
+        self.n_samples = n_samples
+        self.n_filters_time = n_filters_time
+        self.filter_time_length = filter_time_length
+        self.n_filters_spat = n_filters_spat
+        self.pool_time_length = pool_time_length
+        self.pool_time_stride = pool_time_stride
+        self.n_linear_layers = n_linear_layers
+        self.embedding_dim = embedding_dim
+        self.drop_prob = drop_prob
+
+        # 第一个卷积块
+        self.conv1 = nn.Conv2d(1, n_filters_time, (filter_time_length, 1), stride=1)
+        self.conv2 = nn.Conv2d(n_filters_time, n_filters_spat, (1, n_channels), bias=False)
+        self.batch_norm1 = nn.BatchNorm2d(n_filters_spat)
+        self.act1 = nn.ELU()
+        self.pool1 = nn.MaxPool2d(
+            kernel_size=(pool_time_length, 1), stride=(pool_time_stride, 1)
+        )
+        self.dropout1 = nn.Dropout(drop_prob)
+
+        # 辅助函数来创建后续的卷积块
+        def _create_conv_block(in_filters, out_filters, kernel, pool_kernel, pool_stride):
+            return nn.Sequential(
+                nn.Conv2d(in_filters, out_filters, (kernel, 1), stride=1, bias=False),
+                nn.BatchNorm2d(out_filters),
+                nn.ELU(),
+                nn.MaxPool2d(kernel_size=(pool_kernel, 1), stride=(pool_stride, 1)),
+                nn.Dropout(drop_prob),
+            )
+
+        # 后续的卷积块
+        self.block2 = _create_conv_block(n_filters_spat, 50, 10, 3, 3)
+        self.block3 = _create_conv_block(50, 100, 10, 3, 3)
+        self.block4 = _create_conv_block(100, 200, 10, 3, 3)
+
+        self.out = nn.Sequential()
+        self.out_dim = self.calculate_out_dim()
+
+        if n_linear_layers > 1:
+            self.out.add_module("lin_intermediate", nn.Linear(self.out_dim, self.out_dim))
+            self.out.add_module("lin_activation", nn.ELU())
+            self.out.add_module("lin_dropout", nn.Dropout(self.drop_prob))
+
+        self.out.add_module("lin_embedding", nn.Linear(self.out_dim, embedding_dim))
+
+    def calculate_out_dim(self):
+        # 模拟一次前向传播以获取输出维度
+        dummy_input = torch.randn(1, 1, self.n_samples, self.n_channels)
+        x = self.conv1(dummy_input)
+        x = self.conv2(x)
+        x = self.batch_norm1(x)
+        x = self.act1(x)
+        x = self.pool1(x)
+        x = self.dropout1(x)
+        x = self.block2(x)
+        x = self.block3(x)
+        x = self.block4(x)
+        return int(x.reshape(x.shape[0], -1).shape[1])
+
+    def forward(self, x):
+        # 确保输入形状为 (batch, 1, samples, channels)
+        if len(x.shape) == 3:
+            x = x.unsqueeze(1)
+        x = x.permute(0, 1, 3, 2)  # (batch, 1, channels, samples) -> (batch, 1, samples, channels)
+
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.batch_norm1(x)
+        x = self.act1(x)
+        x = self.pool1(x)
+        x = self.dropout1(x)
+        x = self.block2(x)
+        x = self.block3(x)
+        x = self.block4(x)
+        x = x.reshape(x.shape[0], -1)  # 展平
+        x = self.out(x)
+        return x
+
+
+# ----------------------------------------------------
+# 3. 修复后的 EEGEncoder 类 (现在可以正确接收参数)
+# ----------------------------------------------------
 class EEGEncoder(nn.Module):
     def __init__(
-        self,
-        eeg_model_emb_dim,
-        n_chans,
-        eeg_model_pretrained,
-        eeg_model_trainable,
+            self,
+            n_channels,  # <-- 1. 我们在这里添加了 n_channels
+            n_samples,  # <-- 2. 我们在这里添加了 n_samples
+            encoder_name,
+            n_filters_time,
+            filter_time_length,
+            n_filters_spat,
+            pool_time_length,
+            pool_time_stride,
+            n_linear_layers,
+            embedding_dim,
+            drop_prob,
+            channel_merge=None,
+            n_heads=None,
     ):
         super().__init__()
+        self.n_channels = n_channels
+        self.n_samples = n_samples
+        self.encoder_name = encoder_name
+        self.channel_merge = channel_merge
 
-        self.model = Deep4Net(
-            in_chans=n_chans,
-            n_classes=eeg_model_emb_dim,
-            input_window_samples=None,
-            final_conv_length=2,
-            stride_before_pool=True,
-        )
-        to_dense_prediction_model(self.model)
-        if eeg_model_pretrained:
-            self.model.load_state_dict(torch.load("deep4net_trained.pt"))
+        if self.encoder_name == "braindecode_shallow":
+            self.encoder = BraindecodeShallow(
+                n_channels=self.n_channels,  # <-- 3. 我们将 n_channels 传递下去
+                n_samples=self.n_samples,  # <-- 4. 我们将 n_samples 传递下去
+                n_filters_time=n_filters_time,
+                filter_time_length=filter_time_length,
+                n_filters_spat=n_filters_spat,
+                pool_time_length=pool_time_length,
+                pool_time_stride=pool_time_stride,
+                n_linear_layers=n_linear_layers,
+                embedding_dim=embedding_dim,
+                drop_prob=drop_prob,
+            )
+        elif self.encoder_name == "braindecode_deep":
+            self.encoder = BraindecodeDeep(
+                n_channels=self.n_channels,  # <-- 5. 同样传递给 BraindecodeDeep
+                n_samples=self.n_samples,  # <-- 6. 同样传递给 BraindecodeDeep
+                n_filters_time=n_filters_time,
+                filter_time_length=filter_time_length,
+                n_filters_spat=n_filters_spat,
+                pool_time_length=pool_time_length,
+                pool_time_stride=pool_time_stride,
+                n_linear_layers=n_linear_layers,
+                embedding_dim=embedding_dim,
+                drop_prob=drop_prob,
+            )
 
-        for param in self.model.parameters():
-            param.requires_grad = eeg_model_trainable
+        if self.channel_merge == "attention":
+            self.attention_pool = nn.TransformerEncoderLayer(
+                d_model=self.encoder.embedding_dim,
+                nhead=n_heads,
+                dim_feedforward=self.encoder.embedding_dim * 4,
+                dropout=drop_prob,
+                activation="gelu",
+            )
+            self.merger = nn.Linear(
+                self.encoder.embedding_dim * self.n_channels, embedding_dim
+            )
+        elif self.channel_merge == "linear":
+            self.merger = nn.Linear(
+                self.encoder.embedding_dim * self.n_channels, embedding_dim
+            )
 
     def forward(self, x):
-        eeg_features = self.model(x)
-        return eeg_features.transpose(
-            1, 2
-        )  # [B,N_pred,Enc_size]. Allows for projection afterwards
-
-
-class ProjectionHead(nn.Module):
-    def __init__(
-        self,
-        input_dim=128,
-        output_dim=128,
-        dropout_rate=0.1,
-        num_fc_layers=2,
-        transpose=False,
-    ):
-        super().__init__()
-        """
-        self.projection_layer = nn.Linear(input_dim, output_dim)
-        self.fc_layers = nn.ModuleList()
-
-        self.gelu = nn.GELU()
-        self.dropout = nn.Dropout(dropout)
-        for i in range(num_fc_layers):
-            self.fc_layers.append(nn.Linear(output_dim, output_dim))
-        self.layer_norm = nn.LayerNorm(
-            output_dim
-        )  # TODO : what is the benefit of layer norm here?
-        self.transpose = transpose
-
-    def forward(self, x):
-        x_proj = self.projection_layer(x)
-        for layer in self.fc_layers:
-            x_proj_fc = self.dropout(self.gelu(layer(x_proj)))
-            x_proj = x_proj + x_proj_fc
-            x_proj = self.layer_norm(x_proj)
-
-        if self.transpose:
-            x_proj = x_proj.transpose(1, 2)  # [B,Enc_size,N_pred]
-        return x_proj
-        """
-        super(ProjectionHead, self).__init__()
-        self.num_layers = num_fc_layers
-        self.transpose = transpose
-        layers = nn.ModuleList()
-
-        # Input projection layer
-        layers.append(nn.Linear(input_dim, output_dim))
-        layers.append(nn.BatchNorm1d(output_dim))
-        layers.append(nn.ReLU())
-        layers.append(nn.Dropout(dropout_rate))
-
-        # Hidden layers
-        for _ in range(num_fc_layers - 2):
-            layers.append(nn.Linear(output_dim, output_dim))
-            layers.append(nn.BatchNorm1d(output_dim))
-            layers.append(nn.ReLU())
-            layers.append(nn.Dropout(dropout_rate))
-
-        # Output projection layer
-        layers.append(nn.Linear(output_dim, output_dim))
-
-        self.layers = layers
-        self.projection = nn.Sequential(*layers)
-    def forward(self, x):
-        for layer in self.layers:
-            # check if layer is batchnorm
-            if isinstance(layer, nn.BatchNorm1d) and self.transpose:
-                x = layer(x.transpose(1, 2)).transpose(1, 2)
-            else:
-                x = layer(x)
-            
+        x = self.encoder(x)
+        if self.channel_merge == "attention":
+            x = x.permute(2, 0, 1)  # (time, batch, channels)
+            x = self.attention_pool(x)
+            x = x.permute(1, 0, 2)  # (batch, time, channels)
+            x = x.reshape(x.shape[0], -1)  # (batch, time*channels)
+            x = self.merger(x)
+        elif self.channel_merge == "linear":
+            x = x.reshape(x.shape[0], -1)  # (batch, channels*embedding_dim)
+            x = self.merger(x)
         return x
-        #return self.projection(x)
-
-
-class EEGClipModel(pl.LightningModule):
-    def __init__(
-        self,
-        eeg_model_emb_dim=128,
-        text_encoder_emb_dim=1024,
-        projected_emb_dim=64,
-        text_encoder_name="medicalai/ClinicalBERT",
-        text_encoder_pretrained=True,
-        text_encoder_trainable=True,
-        eeg_model_pretrained=False,
-        eeg_model_trainable=True,
-        string_sampling=False,
-        dropout_rate=0.1,
-        num_fc_layers=1,
-        lr=1e-3,
-        lr_frac_lm=0,
-        weight_decay=1e-6,
-        n_chans=21,
-        contrastive_loss_temperature=1,
-        contrastive_loss_func="clip",
-        text_encoder_max_token_len=512,
-        **kwargs,
-    ):
-        super().__init__()
-        self.save_hyperparameters()
-        self.lr = lr
-        self.lr_lm = self.lr * lr_frac_lm
-        self.weight_decay = weight_decay
-        self.n_chans = n_chans
-        self.contrastive_loss_temperature = contrastive_loss_temperature
-        self.contrastive_loss_func = contrastive_loss_func
-        self.text_encoder_emb_dim = text_encoder_emb_dim
-        print(self.text_encoder_emb_dim)
-
-        self.text_encoder = TextEncoder(
-            text_encoder_name=text_encoder_name,
-            text_encoder_pretrained=text_encoder_pretrained,
-            text_encoder_trainable=text_encoder_trainable,
-            string_sampling=string_sampling,
-            max_token_len=text_encoder_max_token_len,
-        )
-
-        self.eeg_encoder = EEGEncoder(
-            eeg_model_emb_dim=eeg_model_emb_dim,
-            n_chans=n_chans,
-            eeg_model_pretrained=eeg_model_pretrained,
-            eeg_model_trainable=eeg_model_trainable,
-        )
-
-        self.text_projection = ProjectionHead(
-            input_dim=self.text_encoder_emb_dim,
-            output_dim=projected_emb_dim,
-            dropout_rate=dropout_rate,
-            num_fc_layers=num_fc_layers,
-        )
-
-        self.eeg_projection = ProjectionHead(
-            input_dim=eeg_model_emb_dim,
-            output_dim=projected_emb_dim,
-            dropout_rate=dropout_rate,
-            num_fc_layers=num_fc_layers,
-            transpose=True,
-        )
-
-        if contrastive_loss_func == "clip":
-            self.loss_fn = ClipLoss()
-            init_logit_scale = np.log(1 / 0.07)
-            init_logit_bias = 0
-        elif contrastive_loss_func == "siglip":
-            self.loss_fn = SigLipLoss()
-            init_logit_scale = np.log(10)
-            init_logit_bias = -10
-
-        self.logit_scale = nn.Parameter(torch.ones([]) * init_logit_scale)
-
-        self.logit_bias = nn.Parameter(torch.ones([]) * init_logit_bias)
-
-        # save features and labels for classification
-        self.features_train = []
-        self.labels_train = []
-
-        self.features_valid = []
-        self.labels_valid = []
-
-        self.report_list = []
-
-    def forward(self, batch):
-        eeg_batch, string_batch, id_batch = batch
-        self.report_list.extend(list(string_batch))
-        # print("CALCULATING EEG FEATURES")
-        eeg_features = self.eeg_encoder(eeg_batch)
-        text_features = self.text_encoder(string_batch)
-
-        # print("PROJECTING EEG FEATURES")
-        eeg_features_proj = self.eeg_projection(eeg_features)
-        eeg_features_proj = torch.mean(eeg_features_proj, dim=1) # average over the time dimension
-        # print("PROJECTING TEXT FEATURES")
-        text_features_proj = self.text_projection(text_features)
-
-        # Extract the labels from the description string
-        # TODO : add other labels
-
-        labels_pathological = [
-            (
-                1
-                if "true" in re.search(r"pathological: (\w+)", string).group(1).lower()
-                else 0
-            )
-            for string in string_batch
-        ]
-        labels_gender = [
-            1 if "m" in re.search(r"gender: (\w+)", string).group(1).lower() else 0
-            for string in string_batch
-        ]
-        labels_under_50 = [
-            1 if int(re.search(r"age: (\d+)", string).group(1)) < 50 else 0
-            for string in string_batch
-        ]
-        labels_med = [
-            1 if any([med in string.lower() for med in medication_list]) else 0
-            for string in string_batch
-        ]
-
-        # stack the labels into an int tensor
-
-        labels = torch.stack(
-            [
-                torch.IntTensor(labels_pathological),
-                torch.IntTensor(labels_gender),
-                torch.IntTensor(labels_under_50),
-                torch.IntTensor(labels_med),
-            ],
-            dim=1,
-        ).to(device)
-
-        return (
-            eeg_features,
-            eeg_features_proj,
-            text_features,
-            text_features_proj,
-            labels,
-        )
-
-    def training_step(self, batch, batch_idx):
-        (
-            eeg_features,
-            eeg_features_proj,
-            text_features,
-            text_features_proj,
-            labels,
-        ) = self.forward(batch)
-        self.features_train.append(eeg_features_proj)
-        self.labels_train.append(labels)
-
-        # loss = self.loss_calculation(eeg_features_proj, text_features_proj,self.contrastive_loss_temperature)
-        loss, logits_per_image = self.loss_fn(
-            eeg_features_proj, text_features_proj, self.logit_scale, self.logit_bias
-        )
-        self.log("train_loss", loss, prog_bar=True)
-
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-        (
-            eeg_features,
-            eeg_features_proj,
-            text_features,
-            text_features_proj,
-            labels,
-        ) = self.forward(batch)
-        self.features_valid.append(eeg_features_proj)
-        self.labels_valid.append(labels)
-
-        loss, logits_per_image = self.loss_fn(
-            eeg_features_proj, text_features_proj, self.logit_scale, self.logit_bias
-        )
-        self.log("val_loss", loss, prog_bar=True)
-
-        #print("logits_per_image")
-        #print(logits_per_image.shape)
-
-        return loss
-
-    def on_validation_epoch_end(self):
-        # report_list = list(set(self.report_list))
-        # with open('parrot.pkl', 'wb') as f:
-        #   pickle.dump(report_list, f)
-
-        features_valid = torch.cat(self.features_valid).cpu()
-
-        labels_valid = torch.cat(self.labels_valid).cpu()
-
-        equal_to_extracted = labels_valid == torch.cat(self.labels_valid).cpu()
-        print(
-            "proportion of correctly extracted labels (train): ",
-            torch.sum(equal_to_extracted) / equal_to_extracted.shape[0],
-        )
-
-        if self.features_train:
-            features_train = torch.cat(self.features_train).cpu()
-
-            labels_train = torch.cat(self.labels_train).cpu()
-
-            print(
-                "balance in train set : ",
-                torch.sum(labels_train) / labels_train.shape[0],
-            )
-            print(
-                "balance in valid set : ",
-                torch.sum(labels_valid) / labels_valid.shape[0],
-            )
-
-            for label_idx, label_name in enumerate(
-                ["pathological", "gender", "under_50", "medication"]
-            ):
-                for classifier_name, classifier in classifiers_dict.items():
-
-                    # classification
-                    classifier.fit(features_train, labels_train[:, label_idx])
-                    preds = classifier.predict(features_valid)
-                    balanced_acc = balanced_accuracy_score(
-                        labels_valid[:, label_idx], preds
-                    )
-                    self.log(
-                        f"val_acc_{classifier_name}_{label_name}",
-                        balanced_acc,
-                        prog_bar=True,
-                    )
-                # zero shot classification
-                zero_shot_preds = []
-                emb_dict = self.text_encoder.zc_sentences_emb_dict[self.text_encoder.text_encoder_name][label_name]
-                s0, s1 = (
-                    emb_dict["s0"],
-                    emb_dict["s1"],
-                )
-                s0, s1 = torch.Tensor(s0).to(device), torch.Tensor(s1).to(device)
-                # add batch dimension to s0 and s1
-                s0, s1 = s0.unsqueeze(0), s1.unsqueeze(0)
-                with torch.no_grad():
-                    s0, s1 = self.text_projection(s0), self.text_projection(s1)
-                s0, s1 = s0.cpu().detach().numpy(), s1.cpu().detach().numpy()
-                s0, s1 = s0[0], s1[0]
-                # (s0,s1) as a numpy array
-                s = np.array([s0, s1])
-                logits_per_eeg = features_valid @ s.T
-                zero_shot_preds = torch.argmax(logits_per_eeg, dim=1)
-                balanced_acc = balanced_accuracy_score(
-                    labels_valid[:, label_idx], zero_shot_preds
-                )
-                self.log(
-                    f"val_acc_zs_{label_name}",
-                    balanced_acc,
-                    prog_bar=True,
-                )
-
-            # zero shot classification, multilabel
-            for label_idx, label_name in zip([[0,1], [0,2], [1,2]], ["pathological_gender", "pathological_under_50","gender_under_50"]):
-                multilabels_valid = labels_valid[:, label_idx[0]] + 2 * labels_valid[:, label_idx[1]]
-                emb_dict = self.text_encoder.zc_sentences_emb_dict[self.text_encoder.text_encoder_name][label_name]
-                s_ = [
-                    emb_dict["s00"],
-                    emb_dict["s01"],
-                    emb_dict["s10"],
-                    emb_dict["s11"],
-                ]
-                s = []
-                for si in s_:
-                    si = torch.Tensor(si).to(device)
-                    si = si.unsqueeze(0)
-                    with torch.no_grad():
-                        si = self.text_projection(si)
-                    si = si.cpu().detach().numpy()
-                    si = si[0]
-                    s.append(si)
-                s = np.array(s)
-                logits_per_eeg = features_valid @ s.T
-                zero_shot_preds = torch.argmax(logits_per_eeg, dim=1)
-                balanced_acc = balanced_accuracy_score(
-                    multilabels_valid, zero_shot_preds
-                )
-                self.log(
-                    f"val_acc_zs_{label_name}",
-                    balanced_acc,
-                    prog_bar=True,
-                )
-                balanced_acc_label_0 = balanced_accuracy_score(
-                    multilabels_valid==0, zero_shot_preds==0
-                )
-                self.log(
-                    f"val_acc_zs_{label_name}_label_0",
-                    balanced_acc_label_0,
-                    prog_bar=True,
-                )
-
-                    
-
-
-                
-                
-                
-
-        self.features_train.clear()
-        self.labels_train.clear()
-
-        self.features_valid.clear()
-        self.labels_valid.clear()
-
-        return None
-
-    def configure_optimizers(self):
-        params = list(self.named_parameters())
-        print("params")
-        print([n for n, p in params])
-
-        def is_backbone(n):
-            return "text_encoder" in n
-
-        grouped_parameters = [
-            {"params": [p for n, p in params if is_backbone(n)], "lr": self.lr_lm},
-            {"params": [p for n, p in params if not is_backbone(n)], "lr": self.lr},
-        ]
-
-        optimizer = torch.optim.AdamW(
-            grouped_parameters, lr=self.lr, weight_decay=self.weight_decay
-        )
-
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=self.trainer.max_epochs - 1
-        )
-        return [optimizer], [scheduler]
-
-
-def on_save_checkpoint(checkpoint):
-    for key in list(checkpoint["state_dict"].keys()):
-        if "text_encoder" in key:
-            print("deleting ", key)
-            del checkpoint["state_dict"][key]

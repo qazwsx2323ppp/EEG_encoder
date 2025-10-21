@@ -1,0 +1,32 @@
+wandb:
+  project: EEG_Decoupling
+  entity: null
+  name: eeg_triplet_train
+data:
+  eeg_path: D:\EEG\egg_encoder\data\EEG_data\eeg_55_95_std.pth
+  image_vec_path: D:\EEG\egg_encoder\data\image_vectors.npy
+  text_vec_path: D:\EEG\egg_encoder\data\text_vectors.npy
+  splits_path: D:\EEG\egg_encoder\data\EEG_data\block_splits_by_image_all.pth
+training:
+  epochs: 100
+  batch_size: 64
+  learning_rate: 0.0001
+  num_workers: 4
+  device: cuda
+  alpha: 0.5
+  temperature: 0.1
+model:
+  model_name: eeg_encoder
+  n_linear_layers: 1
+  channel_merge: linear
+  n_heads: 8
+  embedding_dim: 512
+  n_channels: 128
+  n_samples: 440
+  encoder_name: braindecode_shallow
+  n_filters_time: 40
+  filter_time_length: 25
+  n_filters_spat: 40
+  pool_time_length: 75
+  pool_time_stride: 15
+  drop_prob: 0.5
