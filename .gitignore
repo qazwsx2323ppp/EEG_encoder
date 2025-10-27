@@ -5,6 +5,8 @@ data/
 # 忽略 Python 编译文件
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 # 忽略输出目录
 outputs/
 # 忽略模型权重目录
