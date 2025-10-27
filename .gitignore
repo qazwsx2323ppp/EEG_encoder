@@ -1,0 +1,13 @@
+# 忽略 wandb 实验记录目录
+wandb/
+# 忽略数据目录
+data/
+# 忽略 Python 编译文件
+__pycache__/
+*.pyc
+# 忽略输出目录
+outputs/
+# 忽略模型权重目录
+pth_summaries/
+# 忽略 IDE 配置目录（可选，避免提交 .idea）
+.idea/

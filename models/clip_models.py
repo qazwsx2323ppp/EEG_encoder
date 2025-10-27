@@ -2,7 +2,7 @@
 
 import torch
 from torch import nn
-from braindecode.models import to_dense_prediction_model
+#from braindecode.models import to_dense_prediction_model
 
 
 # ----------------------------------------------------
@@ -209,7 +209,7 @@ class EEGEncoder(nn.Module):
         self.n_channels = n_channels
         self.n_samples = n_samples
         self.encoder_name = encoder_name
-        self.channel_merge = channel_merge
+        #self.channel_merge = channel_merge
 
         if self.encoder_name == "braindecode_shallow":
             self.encoder = BraindecodeShallow(
@@ -238,31 +238,31 @@ class EEGEncoder(nn.Module):
                 drop_prob=drop_prob,
             )
 
-        if self.channel_merge == "attention":
-            self.attention_pool = nn.TransformerEncoderLayer(
-                d_model=self.encoder.embedding_dim,
-                nhead=n_heads,
-                dim_feedforward=self.encoder.embedding_dim * 4,
-                dropout=drop_prob,
-                activation="gelu",
-            )
-            self.merger = nn.Linear(
-                self.encoder.embedding_dim * self.n_channels, embedding_dim
-            )
-        elif self.channel_merge == "linear":
-            self.merger = nn.Linear(
-                self.encoder.embedding_dim * self.n_channels, embedding_dim
-            )
+        # if self.channel_merge == "attention":
+        #     self.attention_pool = nn.TransformerEncoderLayer(
+        #         d_model=self.encoder.embedding_dim,
+        #         nhead=n_heads,
+        #         dim_feedforward=self.encoder.embedding_dim * 4,
+        #         dropout=drop_prob,
+        #         activation="gelu",
+        #     )
+        #     self.merger = nn.Linear(
+        #         self.encoder.embedding_dim * self.n_channels, embedding_dim
+        #     )
+        # elif self.channel_merge == "linear":
+        #     self.merger = nn.Linear(
+        #         self.encoder.embedding_dim * self.n_channels, embedding_dim
+        #     )
 
     def forward(self, x):
         x = self.encoder(x)
-        if self.channel_merge == "attention":
-            x = x.permute(2, 0, 1)  # (time, batch, channels)
-            x = self.attention_pool(x)
-            x = x.permute(1, 0, 2)  # (batch, time, channels)
-            x = x.reshape(x.shape[0], -1)  # (batch, time*channels)
-            x = self.merger(x)
-        elif self.channel_merge == "linear":
-            x = x.reshape(x.shape[0], -1)  # (batch, channels*embedding_dim)
-            x = self.merger(x)
+        # if self.channel_merge == "attention":
+        #     x = x.permute(2, 0, 1)  # (time, batch, channels)
+        #     x = self.attention_pool(x)
+        #     x = x.permute(1, 0, 2)  # (batch, time, channels)
+        #     x = x.reshape(x.shape[0], -1)  # (batch, time*channels)
+        #     x = self.merger(x)
+        # elif self.channel_merge == "linear":
+        #     x = x.reshape(x.shape[0], -1)  # (batch, channels*embedding_dim)
+        #     x = self.merger(x)
         return x

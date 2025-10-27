@@ -51,7 +51,7 @@ model:
   n_channels: 128
   n_samples: 440
 
-  # 编码器主干网络 (来自 clip_models_odd.py)
+  # 编码器主干网络 (来自 clip_models.py)
   encoder_name: 'braindecode_shallow' # 'braindecode_shallow' 或 'braindecode_deep'
 
   # 卷积层参数

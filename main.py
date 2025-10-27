@@ -1,4 +1,9 @@
 # main.py
+
+#忽略兼容警告
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+
 import os
 import hydra
 from omegaconf import DictConfig, OmegaConf
