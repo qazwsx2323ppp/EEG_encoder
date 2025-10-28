@@ -14,10 +14,11 @@ wandb:
 # 3. 数据路径
 # !! 必须修改这里的路径，指向您本地的数据 !!
 data:
-  eeg_path: '.\data\EEG_data\eeg_55_95_std.pth'
-  image_vec_path: '.\data\image_vectors.npy'
-  text_vec_path: '.\data\text_vectors.npy'
-  splits_path: '.\data\EEG_data\block_splits_by_image_all.pth'
+    root: ${hydra:runtime.cwd}
+    eeg_path: ${data.root}/data/EEG_data/eeg_55_95_std.pth
+    image_vec_path: ${data.root}/data/image_vectors.npy
+    text_vec_path: ${data.root}/data/text_vectors.npy
+    splits_path: ${data.root}/data/EEG_data/block_splits_by_image_all.pth
 
 # 4. 训练参数
 training:
