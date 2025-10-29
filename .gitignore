@@ -13,3 +13,5 @@ outputs/
 pth_summaries/
 # 忽略 IDE 配置目录（可选，避免提交 .idea）
 .idea/
+
+ssh/
