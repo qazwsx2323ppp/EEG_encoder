@@ -16,7 +16,7 @@ from tqdm import tqdm
 # 导入您本地的代码
 from models.clip_models_2o import EEGEncoder
 from utils.loss_methods import InfoNCE
-from dataset import TripletDataset
+from dataset_2o import TripletDataset
 
 # 设置 PyTorch 以获得更好的性能
 torch.backends.cudnn.benchmark = True
@@ -135,23 +135,18 @@ def main(cfg: DictConfig):
     ).to(device)
 
     # 2. 准备数据
-    train_dataset = TripletDataset(cfg.data, mode='train')
-    val_dataset = TripletDataset(cfg.data, mode='val')
+    split_index = cfg.data.get("split_index", 0)
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=cfg.training.batch_size,
-        shuffle=True,
-        num_workers=cfg.training.num_workers,
-        pin_memory=True
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=cfg.training.batch_size,
-        shuffle=False,
-        num_workers=cfg.training.num_workers,
-        pin_memory=True
-    )
+    train_dataset = TripletDataset(cfg.data, mode='train', split_index=split_index)
+    val_dataset = TripletDataset(cfg.data, mode='val', split_index=split_index)
+    test_dataset = TripletDataset(cfg.data, mode='test', split_index=split_index)
+
+    train_loader = DataLoader(train_dataset, batch_size=cfg.training.batch_size, shuffle=True,
+                              num_workers=cfg.training.num_workers, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=cfg.training.batch_size, shuffle=False,
+                            num_workers=cfg.training.num_workers, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=cfg.training.batch_size, shuffle=False,
+                             num_workers=cfg.training.num_workers, pin_memory=True)
 
     # 3. 初始化损失函数和优化器
     # 我们需要两个独立的损失函数实例
@@ -197,6 +192,21 @@ def main(cfg: DictConfig):
             print(f"模型已保存到: {model_path}")
 
     print("训练完成。")
+    # 训练完成后在测试集上评估
+    print("【测试集评估】")
+    avg_loss_test, avg_loss_test_img, avg_loss_test_txt = validate(
+        model, test_loader, loss_fn_img, loss_fn_txt, device, cfg.training.alpha
+    )
+
+    print(f"Test Total Loss: {avg_loss_test:.4f}")
+    print(f"Test Image Loss: {avg_loss_test_img:.4f}")
+    print(f"Test Text  Loss: {avg_loss_test_txt:.4f}")
+
+    wandb.log({
+        "test_loss_total": avg_loss_test,
+        "test_loss_image": avg_loss_test_img,
+        "test_loss_text": avg_loss_test_txt
+    })
     wandb.finish()
 
 

@@ -15,6 +15,7 @@ wandb:
 # !! 必须修改这里的路径，指向您本地的数据 !!
 data:
     root: ${hydra:runtime.cwd}
+    split_index: 0  # 0~5 可选
     eeg_path: ${data.root}/data/EEG_data/eeg_55_95_std.pth
     image_vec_path: ${data.root}/data/image_vectors.npy
     text_vec_path: ${data.root}/data/text_vectors.npy
