@@ -14,7 +14,7 @@ import wandb
 from tqdm import tqdm
 
 # 导入您本地的代码
-from models.clip_models import EEGEncoder
+from models.clip_models_2o import EEGEncoder
 from utils.loss_methods import InfoNCE
 from dataset import TripletDataset
 
